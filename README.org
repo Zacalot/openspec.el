@@ -17,14 +17,14 @@ For reference my current workflow with this is:
 7. Use ~a~ on the change to archive it if it's good
 8. Commit, then repeat (Generally speaking, sometimes do manual interventions or other actions)
 * Dependencies
-Ensure [[https://openspec.dev/][OpenSpec]] is installed on your system and is available to PATH (or configure ~openspec-executabl~)
+Ensure [[https://openspec.dev/][OpenSpec]] is installed on your system and is available to PATH (or configure ~openspec-executable~)
 * Installation
 Example installation with ~use-package~:
 #+begin_src emacs-lisp
 (use-package openspec
   :straight (
              :host github
-             :repo "Zacalot/openspec"))
+             :repo "Zacalot/openspec.el"))
 #+end_src
 * Usage
 M-x ~openspec-status~ while in a project. Or use ~C-c o~
