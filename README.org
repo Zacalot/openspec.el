@@ -1,0 +1,101 @@
+#+TITLE: openspec.el - OpenSpec Interface for Emacs
+
+* Disclaimer
+This package was entirely made with Claude Code and OpenSpec over a few hours because I was unable to find a package for OpenSpec. So far it has worked for my purposes but do not take this as an authoritative OpenSpec interface or an example for package creation.
+
+If someone with more elisp development experience would like to take over the project feel free. I intend to continue improving this as needs arrive as OpenSpec has proved useful, but I don't currently intend to maintain this beyond my needs as I am not an experienced elisp developer.
+* Description
+This is an Emacs package that acts as an interface for the [[https://openspec.dev/][OpenSpec]] AI coding assistant tool, which enables spec-driven development so the human pilot of the assistant can verify what will be built before the agent builds it, along with other use cases such as tracking the project's specifications for LLM digestion.
+
+For reference my current workflow with this is:
+1. Write up project changes in a .org file outside the repo
+2. Use ~/openspec:proposal~ with Claude Code and paste changes in
+3. Work with Claude Code to figure out the change proposal
+4. Use ~openspec-status~ in Emacs to review the proposal and its tasks, correcting them by hand or further discussing them with the LLM
+5. Use ~w a~ on the change to copy the ~/openspec:apply <change-name>~ command for pasting into Claude Code
+6. Test change, review code
+7. Use ~a~ on the change to archive it if it's good
+8. Commit, then repeat (Generally speaking, sometimes do manual interventions or other actions)
+* Dependencies
+Ensure [[https://openspec.dev/][OpenSpec]] is installed on your system and is available to PATH (or configure ~openspec-executabl~)
+* Installation
+Example installation with ~use-package~:
+#+begin_src emacs-lisp
+(use-package openspec
+  :straight (
+             :host github
+             :repo "Zacalot/openspec"))
+#+end_src
+* Usage
+M-x ~openspec-status~ while in a project. Or use ~C-c o~
+** Keybindings
+In the status buffer:
+
+| Key   | Description                          |
+|-------+--------------------------------------|
+| ~g~   | Refresh the status buffer            |
+| ~RET~ | Open item at point (proposal/spec)   |
+| ~TAB~ | Expand/collapse section              |
+| ~v~   | Validate active change at point      |
+| ~a~   | Archive change (with confirmation)   |
+| ~k~   | Delete change (with confirmation)    |
+| ~w~   | Kill-ring menu (copy commands, etc.) |
+| ~d~   | Open design.md for change at point   |
+| ~t~   | Open tasks.md for change at point    |
+| ~s~   | Open specs directory for change      |
+| ~i~   | Initialize OpenSpec in project       |
+| ~n~   | Navigate to next item/section        |
+| ~p~   | Navigate to previous item/section    |
+| ~?~   | Show help (transient menu)           |
+| ~q~   | Quit the status buffer               |
+** Global Keybinding
+By default, ~C-c o~ opens the OpenSpec status buffer. This can be customized:
+#+begin_src emacs-lisp
+(setq openspec-status-key "C-c C-o")  ; Change to different key
+(setq openspec-status-key nil)        ; Disable global keybinding
+#+end_src
+
+** Kill-Ring Menu (~w~)
+The kill-ring menu provides options to copy useful text to the clipboard:
+- ~a~ - Copy the ~/openspec:apply <change-name>~ command (for use in AI coding tools)
+- ~i~ - Copy the item name
+- ~p~ - Copy the path to the primary file
+* Customization
+** Custom Variables
+#+begin_src emacs-lisp
+;; Path to the openspec executable (default: "openspec")
+(setq openspec-executable "/path/to/openspec")
+
+;; Global keybinding for openspec-status (default: "C-c o")
+(setq openspec-status-key "C-c o")
+
+;; Minimum required CLI version (default: "0.20.0")
+(setq openspec-minimum-version "0.20.0")
+#+end_src
+
+** Hooks
+- ~openspec-refresh-hook~ - Run after refreshing the status buffer
+- ~openspec-archive-hook~ - Run after successfully archiving a change (receives change name as argument)
+* Features
+** Status Buffer
+The status buffer displays:
+- *Summary*: Overview of specifications, active/completed changes, and task progress
+- *Active Changes*: Changes in progress with task completion percentage and validation status
+- *Completed Changes*: Archived changes (collapsed by default)
+- *Specs*: Available specifications with requirement counts
+
+** Validation
+Pressing ~v~ on a change runs validation and displays:
+- ~[V]~ indicator for passed validation
+- ~[F]~ indicator for failed validation
+- Detailed issues in a separate buffer if validation fails
+
+** Archive Conflict Handling
+When archiving encounters conflicts (e.g., spec header already exists), a conflict resolution buffer appears with options:
+- ~s~ - Skip specs (archive without updating specs)
+- ~e~ - Edit the delta file
+- ~c~ - Convert ADDED to MODIFIED
+- ~q~ - Abort archive
+* Example
+Here is the openspec display for the [[https://github.com/Fission-AI/OpenSpec/][OpenSpec GitHub repository.]] Changes may be easily browsed, modified, archived, and deleted.
+[[file:README.org.images/a64727849405bb09b92427bcb7396f3b.png]]
