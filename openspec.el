@@ -48,7 +48,7 @@
 ;;; Customization
 
 (defgroup openspec nil
-  "Magit-style interface for OpenSpec."
+  "Interface for OpenSpec."
   :group 'tools
   :prefix "openspec-")
 
@@ -210,6 +210,10 @@ Returns the parsed JSON or nil on error."
                              :object-type 'alist
                              :array-type 'list)
         (error nil)))))
+
+(defun openspec--strip-ansi-codes (string)
+  "Remove ANSI escape codes from STRING."
+  (replace-regexp-in-string "\e\\[[0-9;?]*[a-zA-Z]" "" string))
 
 ;;; Project Detection
 
@@ -629,6 +633,17 @@ Returns non-nil if found."
       (run-hooks 'openspec-refresh-hook)
       (message ""))))
 
+(defun openspec--refresh-status-buffers (project-root)
+  "Refresh all openspec-mode buffers for PROJECT-ROOT, preserving point."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (eq major-mode 'openspec-mode)
+                 (equal openspec--project-root project-root))
+        (let ((saved-line (line-number-at-pos)))
+          (openspec-refresh)
+          (goto-char (point-min))
+          (forward-line (1- (min saved-line (count-lines (point-min) (point-max))))))))))
+
 (defun openspec-toggle-section ()
   "Toggle the section at point.
 Preserves point at the section header after re-rendering."
@@ -744,36 +759,61 @@ Preserves point at the section header after re-rendering."
 (defun openspec--archive-change (name &optional skip-specs)
   "Archive change NAME via CLI.
 If SKIP-SPECS is non-nil, pass the --skip-specs flag.
+Always uses --yes to auto-confirm all prompts.
 Returns an alist with keys:
   `success' - t if archive succeeded
-  `output' - raw CLI output
-  `conflicts' - list of parsed conflicts (if any)"
+  `output' - raw CLI output (ANSI codes stripped)
+  `conflicts' - list of parsed conflicts (if any)
+  `warnings' - list of parsed warnings (if any)"
   (let* ((args (if skip-specs
                    (list "archive" name "--yes" "--skip-specs")
                  (list "archive" name "--yes")))
          (result-pair (openspec--run-command-sync args))
          (exit-code (car result-pair))
-         (output (cdr result-pair))
-         (conflicts (openspec--parse-archive-error output)))
-    (list (cons 'success (and (= exit-code 0) (not conflicts)))
+         (output (openspec--strip-ansi-codes (cdr result-pair)))
+         (parsed (openspec--parse-archive-blocker output))
+         (conflicts (alist-get 'conflicts parsed))
+         (warnings (alist-get 'warnings parsed))
+         ;; Check for failure indicators
+         (aborted (string-match-p "Aborted" output))
+         ;; Success if exit code 0 AND no conflicts AND not aborted
+         (success (and (= exit-code 0) (not conflicts) (not aborted))))
+    (list (cons 'success success)
           (cons 'output output)
-          (cons 'conflicts conflicts))))
+          (cons 'conflicts conflicts)
+          (cons 'warnings warnings))))
 
 (defun openspec--handle-archive-result (name result project-root saved-line)
   "Handle the RESULT of archiving change NAME.
 PROJECT-ROOT is the project directory.
 SAVED-LINE is the line number to restore point to on success.
-Returns t if the archive succeeded, nil otherwise."
+Returns t if the archive succeeded, nil otherwise.
+
+Flow is linear - archive already ran with --yes, so we just display results:
+  - Conflicts: show conflict buffer for resolution
+  - Success with warnings: show warnings (informational), archive completed
+  - Success: refresh, done
+  - Failure: show error buffer"
   (let ((success (alist-get 'success result))
         (output (alist-get 'output result))
-        (conflicts (alist-get 'conflicts result)))
+        (conflicts (alist-get 'conflicts result))
+        (warnings (alist-get 'warnings result)))
     (cond
-     ;; Conflicts detected - show conflict UI
+     ;; Conflicts detected - show conflict UI for resolution
      (conflicts
       (message "Archive failed with %d conflict(s)" (length conflicts))
       (openspec--show-conflict-buffer name conflicts project-root)
       nil)
-     ;; Success - no conflicts
+     ;; Success with warnings - show warnings as information (archive completed)
+     ((and success warnings)
+      (message "Archived with %d warning(s): %s" (length warnings) name)
+      (openspec--show-warning-buffer name warnings)
+      (run-hook-with-args 'openspec-archive-hook name)
+      (openspec-refresh)
+      (goto-char (point-min))
+      (forward-line (1- (min saved-line (count-lines (point-min) (point-max)))))
+      t)
+     ;; Success - no issues
      (success
       (message "Archived: %s" name)
       (run-hook-with-args 'openspec-archive-hook name)
@@ -781,7 +821,7 @@ Returns t if the archive succeeded, nil otherwise."
       (goto-char (point-min))
       (forward-line (1- (min saved-line (count-lines (point-min) (point-max)))))
       t)
-     ;; Other failure - show generic error
+     ;; Failure - show error buffer
      (t
       (message "Archive failed: %s" name)
       (openspec--show-archive-error name output)
@@ -845,6 +885,32 @@ Returns t if the archive succeeded, nil otherwise."
         (special-mode)))
     (display-buffer buf)))
 
+;;; Archive Warning Handling
+
+(defun openspec--show-warning-buffer (name warnings)
+  "Display WARNINGS for change NAME in a dedicated buffer.
+Returns the buffer."
+  (let ((buf (get-buffer-create "*openspec-warning*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize "Archive Warnings\n" 'face 'openspec-section-header))
+        (insert (format "Change: %s\n\n" name))
+        (insert (propertize (format "%d warning(s) detected:\n\n"
+                                    (length warnings))
+                            'face 'openspec-warning))
+        (dolist (warning warnings)
+          (insert "  ")
+          (insert (propertize "⚠" 'face 'openspec-warning))
+          (insert " ")
+          (insert warning)
+          (insert "\n"))
+        (insert "\n")
+        (goto-char (point-min))
+        (special-mode)))
+    (display-buffer buf)
+    buf))
+
 ;;; Archive Conflict Handling
 
 (defvar-local openspec--conflict-context nil
@@ -852,25 +918,73 @@ Returns t if the archive succeeded, nil otherwise."
 An alist with keys: change-name, conflicts, project-root.
 Used in the *openspec-conflict* buffer for non-transient access.")
 
-(defun openspec--parse-archive-error (output)
-  "Parse archive error OUTPUT for spec conflicts.
-Returns a list of conflict alists, each with keys:
-spec, operation, header, reason.
-Returns nil if no conflicts are detected."
-  (let ((conflicts nil)
+(defun openspec--parse-archive-blocker (output)
+  "Parse archive OUTPUT for spec conflicts and warnings.
+Returns an alist with keys:
+  `conflicts' - list of blocking spec conflicts
+  `warnings' - list of non-blocking warning messages
+Each conflict alist has keys: spec, operation, header, reason.
+Returns nil values for both keys if none are detected.
+
+Handles multiple conflict formats:
+  - `<spec> ADDED failed for header \"<header>\" - already exists`
+  - `<spec> MODIFIED failed for header \"<header>\" - not found`
+  - `<spec> REMOVED failed for header \"<header>\" - <reason>`
+  - `<spec>: target spec does not exist; ...`
+
+Handles warnings:
+  - Lines with `⚠` symbol (proposal warnings)
+  - `X incomplete task(s) found`"
+  (let ((output (openspec--strip-ansi-codes output))
+        (conflicts nil)
+        (warnings nil)
         (pos 0))
-    ;; Match patterns like: "<spec> ADDED failed for header \"<header>\" - already exists"
-    ;; or: "<spec> MODIFIED failed for header \"<header>\" - not found"
+    ;; Pattern 1: "<spec> ADDED/MODIFIED/REMOVED failed for header \"<header>\" - <reason>"
     (while (string-match
-            "\\([a-zA-Z0-9_-]+\\) \\(ADDED\\|MODIFIED\\|REMOVED\\) failed for header \"\\([^\"]+\\)\" - \\(.+\\)"
+            "\\([a-zA-Z0-9_-]+\\) \\(ADDED\\|MODIFIED\\|REMOVED\\|RENAMED\\) failed for header \"\\([^\"]+\\)\" - \\([^\n]+\\)"
             output pos)
       (push (list (cons 'spec (match-string 1 output))
                   (cons 'operation (match-string 2 output))
                   (cons 'header (match-string 3 output))
-                  (cons 'reason (match-string 4 output)))
+                  (cons 'reason (string-trim (match-string 4 output))))
             conflicts)
       (setq pos (match-end 0)))
-    (nreverse conflicts)))
+    ;; Pattern 2: "<spec>: target spec does not exist; ..."
+    (setq pos 0)
+    (while (string-match
+            "\\([a-zA-Z0-9_-]+\\): target spec does not exist[;,] \\([^\n]+\\)"
+            output pos)
+      (push (list (cons 'spec (match-string 1 output))
+                  (cons 'operation "MODIFIED")
+                  (cons 'header nil)
+                  (cons 'reason (concat "target spec does not exist; " (string-trim (match-string 2 output)))))
+            conflicts)
+      (setq pos (match-end 0)))
+    ;; Pattern 3: Generic "<spec>: <error>" patterns (catch-all for other errors)
+    (setq pos 0)
+    (while (string-match
+            "\\([a-zA-Z0-9_-]+\\): \\(only ADDED requirements are allowed\\|cannot \\|invalid \\)\\([^\n]+\\)"
+            output pos)
+      (let ((spec (match-string 1 output))
+            (reason (concat (match-string 2 output) (match-string 3 output))))
+        ;; Avoid duplicates from pattern 2
+        (unless (cl-find spec conflicts :key (lambda (c) (alist-get 'spec c)) :test #'equal)
+          (push (list (cons 'spec spec)
+                      (cons 'operation "UNKNOWN")
+                      (cons 'header nil)
+                      (cons 'reason (string-trim reason)))
+                conflicts)))
+      (setq pos (match-end 0)))
+    ;; Parse warnings: lines with "⚠" symbol
+    (setq pos 0)
+    (while (string-match "\\(?:\n\\|\\`\\)[ \t]*⚠[ \t]*\\([^\n]+\\)" output pos)
+      (push (string-trim (match-string 1 output)) warnings)
+      (setq pos (match-end 0)))
+    ;; Parse incomplete tasks warning
+    (when (string-match "\\([0-9]+\\) incomplete task(s) found" output)
+      (push (format "%s incomplete task(s) found" (match-string 1 output)) warnings))
+    (list (cons 'conflicts (nreverse conflicts))
+          (cons 'warnings (nreverse warnings)))))
 
 (defun openspec--show-conflict-buffer (change-name conflicts project-root)
   "Display CONFLICTS for CHANGE-NAME in a dedicated buffer.
@@ -893,9 +1007,11 @@ PROJECT-ROOT is used for navigating to delta files."
             (insert "  ")
             (insert (propertize spec 'face 'openspec-spec-name))
             (insert " ")
-            (insert (propertize operation 'face 'openspec-error))
-            (insert (format " failed for \"%s\"\n" header))
-            (insert (format "    Reason: %s\n" reason))
+            (insert (propertize (or operation "ERROR") 'face 'openspec-error))
+            (if header
+                (insert (format " failed for \"%s\"\n" header))
+              (insert " failed\n"))
+            (insert (format "    Reason: %s\n" (or reason "unknown")))
             ;; Add navigation property
             (put-text-property start (point)
                                'openspec-conflict-item
@@ -917,7 +1033,6 @@ PROJECT-ROOT is used for navigating to delta files."
                          (define-key map (kbd "RET") #'openspec--conflict-buffer-open-delta)
                          (define-key map (kbd "s") #'openspec-conflict-skip-specs)
                          (define-key map (kbd "e") #'openspec-conflict-edit-delta)
-                         (define-key map (kbd "c") #'openspec-conflict-convert-to-modified)
                          (define-key map (kbd "q") #'openspec-conflict-abort)
                          map))
         (special-mode)
@@ -980,12 +1095,7 @@ to buffer-local variable (for direct keybindings in conflict buffer)."
               (with-current-buffer buf
                 (setq openspec--conflict-context nil))
               (kill-buffer buf))
-            ;; Refresh the status buffer if it exists
-            (dolist (buf (buffer-list))
-              (with-current-buffer buf
-                (when (and (eq major-mode 'openspec-mode)
-                           (equal openspec--project-root project-root))
-                  (openspec-refresh)))))
+            (openspec--refresh-status-buffers project-root))
         (message "Archive failed: %s" (alist-get 'output result))))))
 
 (defun openspec-conflict-edit-delta ()
@@ -1012,34 +1122,6 @@ to buffer-local variable (for direct keybindings in conflict buffer)."
             (message "Delta file not found: %s" delta-file)))
       (message "No conflicts to edit"))))
 
-(defun openspec-conflict-convert-to-modified ()
-  "Convert ADDED to MODIFIED in the conflicting delta file."
-  (interactive)
-  (let* ((ctx (openspec--get-conflict-context))
-         (change-name (alist-get 'change-name ctx))
-         (conflicts (alist-get 'conflicts ctx))
-         (project-root (alist-get 'project-root ctx))
-         (first-conflict (car conflicts))
-         (operation (and first-conflict (alist-get 'operation first-conflict))))
-    (cond
-     ((not first-conflict)
-      (message "No conflicts to convert"))
-     ((not (equal operation "ADDED"))
-      (message "Conversion not applicable for %s conflicts" operation))
-     (t
-      (let* ((spec (alist-get 'spec first-conflict))
-             (delta-file (openspec--change-file
-                          change-name (format "specs/%s/spec.md" spec) project-root)))
-        (if (not (file-exists-p delta-file))
-            (message "Delta file not found: %s" delta-file)
-          (when (yes-or-no-p
-                 (format "Convert '## ADDED Requirements' to '## MODIFIED Requirements' in %s? "
-                         spec))
-            (openspec--convert-added-to-modified delta-file)
-            (message "Converted ADDED to MODIFIED in %s" spec)
-            (when (yes-or-no-p "Retry archive? ")
-              (openspec--retry-archive change-name project-root)))))))))
-
 (defun openspec--convert-added-to-modified (file)
   "Replace '## ADDED Requirements' with '## MODIFIED Requirements' in FILE."
   (with-current-buffer (find-file-noselect file)
@@ -1050,18 +1132,31 @@ to buffer-local variable (for direct keybindings in conflict buffer)."
     (save-buffer)))
 
 (defun openspec--retry-archive (change-name project-root)
-  "Retry archiving CHANGE-NAME in PROJECT-ROOT."
+  "Retry archiving CHANGE-NAME in PROJECT-ROOT.
+Uses simplified linear flow - archive runs with --yes, results displayed after."
   (let ((default-directory project-root))
     (message "Retrying archive %s..." change-name)
     (let* ((result (openspec--archive-change change-name))
            (success (alist-get 'success result))
-           (conflicts (alist-get 'conflicts result)))
+           (output (alist-get 'output result))
+           (conflicts (alist-get 'conflicts result))
+           (warnings (alist-get 'warnings result)))
       (cond
-       ;; Conflicts detected
+       ;; Conflicts detected - show conflict UI for resolution
        (conflicts
         (message "Archive failed with %d conflict(s)" (length conflicts))
         (openspec--show-conflict-buffer change-name conflicts project-root))
-       ;; Success
+       ;; Success with warnings - show warnings (informational)
+       ((and success warnings)
+        (message "Archived with %d warning(s): %s" (length warnings) change-name)
+        (openspec--show-warning-buffer change-name warnings)
+        (run-hook-with-args 'openspec-archive-hook change-name)
+        (when-let* ((buf (get-buffer "*openspec-conflict*")))
+          (with-current-buffer buf
+            (setq openspec--conflict-context nil))
+          (kill-buffer buf))
+        (openspec--refresh-status-buffers project-root))
+       ;; Success - no issues
        (success
         (message "Archived: %s" change-name)
         (run-hook-with-args 'openspec-archive-hook change-name)
@@ -1069,15 +1164,11 @@ to buffer-local variable (for direct keybindings in conflict buffer)."
           (with-current-buffer buf
             (setq openspec--conflict-context nil))
           (kill-buffer buf))
-        ;; Refresh status buffer
-        (dolist (buf (buffer-list))
-          (with-current-buffer buf
-            (when (and (eq major-mode 'openspec-mode)
-                       (equal openspec--project-root project-root))
-              (openspec-refresh)))))
-       ;; Other failure
+        (openspec--refresh-status-buffers project-root))
+       ;; Failure - show error
        (t
-        (message "Archive failed: %s" (alist-get 'output result)))))))
+        (message "Archive failed: %s" change-name)
+        (openspec--show-archive-error change-name output))))))
 
 (defun openspec-conflict-abort ()
   "Abort the archive operation."
@@ -1093,16 +1184,7 @@ to buffer-local variable (for direct keybindings in conflict buffer)."
   ["Archive Conflict Resolution"
    ("s" "Skip specs (archive without spec updates)" openspec-conflict-skip-specs)
    ("e" "Edit delta file" openspec-conflict-edit-delta)
-   ("c" "Convert ADDED to MODIFIED" openspec-conflict-convert-to-modified)
-   ("v" "View conflict details" openspec-conflict-view-details)
    ("q" "Abort" openspec-conflict-abort)])
-
-(defun openspec-conflict-view-details ()
-  "Display the conflict details buffer."
-  (interactive)
-  (if-let* ((buf (get-buffer "*openspec-conflict*")))
-      (display-buffer buf)
-    (message "No conflict details available")))
 
 ;;; Delete Change
 

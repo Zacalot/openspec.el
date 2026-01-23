@@ -9,10 +9,10 @@ This is an Emacs package that acts as an interface for the [[https://openspec.de
 
 For reference my current workflow with this is:
 1. Write up project changes in a .org file outside the repo
-2. Use ~/openspec:proposal~ with Claude Code and paste changes in
+2. Use ~/openspec:proposal~ with Claude Code and paste changes into a new session
 3. Work with Claude Code to figure out the change proposal
 4. Use ~openspec-status~ in Emacs to review the proposal and its tasks, correcting them by hand or further discussing them with the LLM
-5. Use ~w a~ on the change to copy the ~/openspec:apply <change-name>~ command for pasting into Claude Code
+5. Use ~w a~ on the change to copy the ~/openspec:apply <change-name>~ command for pasting into a new Claude Code session
 6. Test change, review code
 7. Use ~a~ on the change to archive it if it's good
 8. Commit, then repeat (Generally speaking, sometimes do manual interventions or other actions)
