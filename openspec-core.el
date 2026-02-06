@@ -159,25 +159,32 @@ Returns a cons cell (ACTIVE . COMPLETED)."
         (push change active)))
     (cons (nreverse active) (nreverse completed))))
 
+(defun openspec--count-requirements (spec-file)
+  "Count requirements in SPEC-FILE by counting `### Requirement:' headers."
+  (if (file-exists-p spec-file)
+      (with-temp-buffer
+        (insert-file-contents spec-file)
+        (let ((count 0))
+          (goto-char (point-min))
+          (while (re-search-forward "^### Requirement:" nil t)
+            (setq count (1+ count)))
+          count))
+    0))
+
 (defun openspec--fetch-specs ()
-  "Fetch the list of specs with requirement counts via CLI JSON API."
+  "Fetch the list of specs with requirement counts by parsing spec files."
   (let* ((root (openspec--project-root))
          (specs-dir (expand-file-name "openspec/specs" root))
-         (default-directory root)
          (specs nil))
     (when (file-directory-p specs-dir)
       (dolist (entry (directory-files specs-dir nil "^[^.]"))
-        (when (file-directory-p (expand-file-name entry specs-dir))
-          (let ((json (openspec--run-json-command-sync
-                       (list "show" entry "--type" "spec" "--json" "--no-interactive"))))
-            (if json
-                (push (list (cons 'name (or (alist-get 'id json) entry))
-                            (cons 'requirementCount (or (alist-get 'requirementCount json) 0))
-                            (cons 'title (alist-get 'title json)))
-                      specs)
-              (push (list (cons 'name entry)
-                          (cons 'requirementCount 0))
-                    specs))))))
+        (let ((entry-dir (expand-file-name entry specs-dir)))
+          (when (file-directory-p entry-dir)
+            (push (list (cons 'name entry)
+                        (cons 'requirementCount
+                              (openspec--count-requirements
+                               (expand-file-name "spec.md" entry-dir))))
+                  specs)))))
     (nreverse specs)))
 
 ;;; Shared Utilities
