@@ -467,6 +467,14 @@ Prompts for a name and validates it as kebab-case
     (kill-new str)
     (message "Copied: %s" str)))
 
+(defun openspec-kill-ring-archive-command ()
+  "Kill-Ring the archive command for the change at point."
+  (interactive)
+  (let* ((name (openspec--change-at-point-or-error))
+         (str (format "/opsx:archive %s" name)))
+    (kill-new str)
+    (message "Copied: %s" str)))
+
 (defun openspec-kill-ring-item-name ()
   "Kill-Ring the name of the item at point."
   (interactive)
@@ -493,6 +501,7 @@ Prompts for a name and validates it as kebab-case
   ["Kill-Ring"
    ("a" "Apply command" openspec-kill-ring-apply-command)
    ("v" "Verify command" openspec-kill-ring-verify-command)
+   ("r" "Archive command" openspec-kill-ring-archive-command)
    ("i" "Item name" openspec-kill-ring-item-name)
    ("p" "Path to file" openspec-kill-ring-item-path)])
 
